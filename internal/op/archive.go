@@ -54,7 +54,7 @@ func GetArchiveMeta(ctx context.Context, storage driver.Driver, path string, arg
 	return meta, err
 }
 
-func getArchiveToolAndStream(ctx context.Context, storage driver.Driver, path string, args model.LinkArgs) (model.Obj, tool.Tool, *stream.SeekableStream, error) {
+func GetArchiveToolAndStream(ctx context.Context, storage driver.Driver, path string, args model.LinkArgs) (model.Obj, tool.Tool, []*stream.SeekableStream, error) {
 	l, obj, err := Link(ctx, storage, path, args)
 	if err != nil {
 		return nil, nil, nil, errors.WithMessagef(err, "failed get [%s] link", path)
@@ -68,7 +68,7 @@ func getArchiveToolAndStream(ctx context.Context, storage driver.Driver, path st
 	if err != nil {
 		return nil, nil, nil, errors.WithMessagef(err, "failed get [%s] stream", path)
 	}
-	return obj, t, ss, nil
+	return obj, t, []*stream.SeekableStream{ss}, nil
 }
 
 func getArchiveMeta(ctx context.Context, storage driver.Driver, path string, args model.ArchiveMetaArgs) (model.Obj, *model.ArchiveMetaProvider, error) {
@@ -94,16 +94,16 @@ func getArchiveMeta(ctx context.Context, storage driver.Driver, path string, arg
 			return obj, archiveMetaProvider, err
 		}
 	}
-	obj, t, ss, err := getArchiveToolAndStream(ctx, storage, path, args.LinkArgs)
+	obj, t, ss, err := GetArchiveToolAndStream(ctx, storage, path, args.LinkArgs)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() {
-		if err := ss.Close(); err != nil {
+		if err := ss[0].Close(); err != nil {
 			log.Errorf("failed to close file streamer, %v", err)
 		}
 	}()
-	meta, err := t.GetMeta(ss, args.ArchiveArgs)
+	meta, err := t.GetMeta(ss[0], args.ArchiveArgs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -114,9 +114,9 @@ func getArchiveMeta(ctx context.Context, storage driver.Driver, path string, arg
 	if !storage.Config().NoCache {
 		Expiration := time.Minute * time.Duration(storage.GetStorage().CacheExpiration)
 		archiveMetaProvider.Expiration = &Expiration
-	} else if ss.Link.MFile == nil {
+	} else if ss[0].Link.MFile == nil {
 		// alias、crypt 驱动
-		archiveMetaProvider.Expiration = ss.Link.Expiration
+		archiveMetaProvider.Expiration = ss[0].Link.Expiration
 	}
 	return obj, archiveMetaProvider, err
 }
@@ -188,16 +188,16 @@ func _listArchive(ctx context.Context, storage driver.Driver, path string, args 
 			return obj, files, err
 		}
 	}
-	obj, t, ss, err := getArchiveToolAndStream(ctx, storage, path, args.LinkArgs)
+	obj, t, ss, err := GetArchiveToolAndStream(ctx, storage, path, args.LinkArgs)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() {
-		if err := ss.Close(); err != nil {
+		if err := ss[0].Close(); err != nil {
 			log.Errorf("failed to close file streamer, %v", err)
 		}
 	}()
-	files, err := t.List(ss, args.ArchiveInnerArgs)
+	files, err := t.List(ss[0], args.ArchiveInnerArgs)
 	return obj, files, err
 }
 
@@ -393,18 +393,23 @@ func (s *streamWithParent) Close() error {
 }
 
 func InternalExtract(ctx context.Context, storage driver.Driver, path string, args model.ArchiveInnerArgs) (io.ReadCloser, int64, error) {
-	_, t, ss, err := getArchiveToolAndStream(ctx, storage, path, args.LinkArgs)
+	_, t, ss, err := GetArchiveToolAndStream(ctx, storage, path, args.LinkArgs)
 	if err != nil {
 		return nil, 0, err
 	}
-	rc, size, err := t.Extract(ss, args)
+	defer func() {
+		if err := ss[0].Close(); err != nil {
+			log.Errorf("failed to close file streamer, %v", err)
+		}
+	}()
+	rc, size, err := t.Extract(ss[0], args)
 	if err != nil {
-		if e := ss.Close(); e != nil {
+		if e := ss[0].Close(); e != nil {
 			log.Errorf("failed to close file streamer, %v", e)
 		}
 		return nil, 0, err
 	}
-	return &streamWithParent{rc: rc, parent: ss}, size, nil
+	return &streamWithParent{rc: rc, parent: ss[0]}, size, nil
 }
 
 func ArchiveDecompress(ctx context.Context, storage driver.Driver, srcPath, dstDirPath string, args model.ArchiveDecompressArgs, lazyCache ...bool) error {

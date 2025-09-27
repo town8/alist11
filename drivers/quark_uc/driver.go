@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"crypto/sha1"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/go-resty/resty/v2"
 	log "github.com/sirupsen/logrus"
+	"github.com/alist-org/alist/v3/pkg/http_range"
 )
 
 type QuarkOrUC struct {
@@ -67,6 +69,15 @@ func (d *QuarkOrUC) Link(ctx context.Context, file model.Obj, args model.LinkArg
 		return nil, err
 	}
 
+	client := &http.Client{}
+	baseReq, err := http.NewRequestWithContext(ctx, "GET", resp.Data[0].DownloadUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+	baseReq.Header.Set("Cookie", d.Cookie)
+	baseReq.Header.Set("Referer", d.conf.referer)
+	baseReq.Header.Set("User-Agent", ua)
+
 	return &model.Link{
 		URL: resp.Data[0].DownloadUrl,
 		Header: http.Header{
@@ -74,11 +85,24 @@ func (d *QuarkOrUC) Link(ctx context.Context, file model.Obj, args model.LinkArg
 			"Referer":    []string{d.conf.referer},
 			"User-Agent": []string{ua},
 		},
-		Concurrency: 2,
-		PartSize:    10 * utils.MB,
+		RangeReadCloser: &model.RangeReadCloser{
+			RangeReader: func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
+				req := baseReq.Clone(ctx)
+				if httpRange.Length > 0 {
+					req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", httpRange.Start, httpRange.Start+httpRange.Length-1))
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					return nil, err
+				}
+				return resp.Body, nil
+			},
+		},
+		Concurrency: 1,
+		PartSize:    0,
 	}, nil
 }
-
+//9
 func (d *QuarkOrUC) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
 	data := base.Json{
 		"dir_init_lock": false,

@@ -519,7 +519,7 @@ func (d *Yun139) getPartSize(size int64) int64 {
 	if size/GB > 30 {
 		return 512 * MB
 	}
-	return 100 * MB
+	return 300 * MB
 }
 
 func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
@@ -790,6 +790,13 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 			return fmt.Errorf("get file upload url failed with result code: %s, message: %s", resp.Data.Result.ResultCode, resp.Data.Result.ResultDesc)
 		}
 
+		// 保存上传任务ID和内容ID列表
+		uploadTaskID := resp.Data.UploadResult.UploadTaskID
+		contentIDList := resp.Data.UploadResult.NewContentIDList
+		if len(contentIDList) == 0 {
+			return fmt.Errorf("no content ID returned from upload request")
+		}
+
 		// Progress
 		p := driver.NewProgress(stream.GetSize(), up)
 
@@ -822,7 +829,7 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 			req.Header.Set("Content-Type", "text/plain;name="+unicode(stream.GetName()))
 			req.Header.Set("contentSize", strconv.FormatInt(stream.GetSize(), 10))
 			req.Header.Set("range", fmt.Sprintf("bytes=%d-%d", start, start+byteSize-1))
-			req.Header.Set("uploadtaskID", resp.Data.UploadResult.UploadTaskID)
+			req.Header.Set("uploadtaskID", uploadTaskID)
 			req.Header.Set("rangeType", "0")
 			req.ContentLength = byteSize
 
@@ -845,6 +852,26 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 			}
 			if result.ResultCode != 0 {
 				return fmt.Errorf("upload failed with result code: %d, message: %s", result.ResultCode, result.Msg)
+			}
+			// 最后一个分片上传完成时，等待服务器处理
+			if i == part-1 && d.isFamily() {
+				// 等待一小段时间让服务器处理
+				time.Sleep(time.Second * 2)
+				// 尝试刷新目录列表，如果文件存在则说明上传成功
+				files, err := d.List(ctx, dstDir, model.ListArgs{Refresh: true})
+				if err != nil {
+					return err
+				}
+				found := false
+				for _, file := range files {
+					if file.GetName() == stream.GetName() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("file not found after upload, please try again")
+				}
 			}
 		}
 		return nil

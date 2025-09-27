@@ -68,20 +68,35 @@ func (d *Open115) singleUpload(ctx context.Context, tempF model.File, tokenResp 
 // 	} `json:"data"`
 // }
 
+func (d *Open115) isTokenExpired(tokenResp *sdk.UploadGetTokenResp) bool {
+	// 解析过期时间字符串
+	expiration, err := time.Parse(time.RFC3339, tokenResp.Expiration)
+	if err != nil {
+		// 如果解析失败，保守起见认为token已过期
+		return true
+	}
+	// 在50分钟时刷新
+	expireTime := time.Now().Add(5 * time.Minute)
+	return expiration.Before(expireTime)
+}
+
+func (d *Open115) refreshUploadToken(ctx context.Context) (*sdk.UploadGetTokenResp, error) {
+	return d.client.UploadGetToken(ctx)
+}
+
 func (d *Open115) multpartUpload(ctx context.Context, tempF model.File, stream model.FileStreamer, up driver.UpdateProgress, tokenResp *sdk.UploadGetTokenResp, initResp *sdk.UploadInitResp) error {
 	fileSize := stream.GetSize()
 	chunkSize := calPartSize(fileSize)
-        
-        newTokenResp, err := d.client.UploadGetToken(ctx)
-        if err != nil {
-                return err
-        }
 
-	ossClient, err := oss.New(newTokenResp.Endpoint, newTokenResp.AccessKeyId, newTokenResp.AccessKeySecret, oss.SecurityToken(newTokenResp.SecurityToken))
-	if err != nil {
-		return err
+	createOSSClient := func(token *sdk.UploadGetTokenResp) (*oss.Bucket, error) {
+		ossClient, err := oss.New(token.Endpoint, token.AccessKeyId, token.AccessKeySecret, oss.SecurityToken(token.SecurityToken))
+		if err != nil {
+			return nil, err
+		}
+		return ossClient.Bucket(initResp.Bucket)
 	}
-	bucket, err := ossClient.Bucket(initResp.Bucket)
+
+	bucket, err := createOSSClient(tokenResp)
 	if err != nil {
 		return err
 	}
@@ -94,9 +109,29 @@ func (d *Open115) multpartUpload(ctx context.Context, tempF model.File, stream m
 	partNum := (stream.GetSize() + chunkSize - 1) / chunkSize
 	parts := make([]oss.UploadPart, partNum)
 	offset := int64(0)
+
+	// 每20分钟强制刷新token
+	lastTokenRefresh := time.Now()
+	tokenRefreshInterval := 20 * time.Minute
+
 	for i := int64(1); i <= partNum; i++ {
 		if utils.IsCanceled(ctx) {
 			return ctx.Err()
+		}
+
+		// 每20分钟强制刷新token
+		if time.Since(lastTokenRefresh) > tokenRefreshInterval {
+			newToken, err := d.refreshUploadToken(ctx)
+			if err != nil {
+				return err
+			}
+			tokenResp = newToken
+			// 使用新token创建bucket客户端，用于后续分片上传
+			bucket, err = createOSSClient(tokenResp)
+			if err != nil {
+				return err
+			}
+			lastTokenRefresh = time.Now()
 		}
 
 		partSize := chunkSize
@@ -129,13 +164,11 @@ func (d *Open115) multpartUpload(ctx context.Context, tempF model.File, stream m
 		up(float64(offset) / float64(fileSize))
 	}
 
-	// callbackRespBytes := make([]byte, 1024)
 	_, err = bucket.CompleteMultipartUpload(
 		imur,
 		parts,
 		oss.Callback(base64.StdEncoding.EncodeToString([]byte(initResp.Callback.Value.Callback))),
 		oss.CallbackVar(base64.StdEncoding.EncodeToString([]byte(initResp.Callback.Value.CallbackVar))),
-		// oss.CallbackResult(&callbackRespBytes),
 	)
 	if err != nil {
 		return err

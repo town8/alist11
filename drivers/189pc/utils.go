@@ -541,9 +541,15 @@ func (y *Cloud189PC) StreamUpload(ctx context.Context, dstDir model.Obj, file mo
 		partInfo := fmt.Sprintf("%d-%s", i, base64.StdEncoding.EncodeToString(md5Bytes))
 
 		threadG.Go(func(ctx context.Context) error {
-			defer sem.Release(1)
+			defer func() {
+				if r := recover(); r != nil {
+					sem.Release(1)
+					panic(r)
+				}
+			}()
 			uploadUrls, err := y.GetMultiUploadUrls(ctx, isFamily, initMultiUpload.Data.UploadFileID, partInfo)
 			if err != nil {
+				sem.Release(1)
 				return err
 			}
 
@@ -552,9 +558,11 @@ func (y *Cloud189PC) StreamUpload(ctx context.Context, dstDir model.Obj, file mo
 			_, err = y.put(ctx, uploadUrl.RequestURL, uploadUrl.Headers, false,
 				driver.NewLimitedUploadStream(ctx, bytes.NewReader(byteData)), isFamily)
 			if err != nil {
+				sem.Release(1)
 				return err
 			}
 			up(float64(threadG.Success()) * 100 / float64(count))
+			sem.Release(1)
 			return nil
 		})
 	}

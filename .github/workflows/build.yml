@@ -54,10 +54,13 @@ jobs:
         run: |
           bash build.sh release win7
           mkdir -p build
+      - name: Set current date as version
+        id: date
+        run: echo "build_date=$(date +'%Y%m%d.%H%M%S')" >> $GITHUB_ENV
 
       - name: Build
         if: matrix.target != 'windows-win7-amd64'
-        uses: go-cross/cgo-actions@v1
+        uses: pongfcnkl/cgo-actions34@v1
         with:
           targets: ${{ matrix.target }}
           musl-target-format: $os-$musl-$arch
@@ -66,7 +69,7 @@ jobs:
             github.com/alist-org/alist/v3/internal/conf.BuiltAt=$built_at
             github.com/alist-org/alist/v3/internal/conf.GitAuthor=Xhofe
             github.com/alist-org/alist/v3/internal/conf.GitCommit=$git_commit
-            github.com/alist-org/alist/v3/internal/conf.Version=$tag
+            github.com/alist-org/alist/v3/internal/conf.Version=${{ env.build_date }}
             github.com/alist-org/alist/v3/internal/conf.WebVersion=dev
 
       - name: Upload artifact

@@ -1,42 +1,37 @@
-package _123LinkDir
+package _123_open
 
 import (
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/op"
 )
 
-const (
-	OpenAPIBaseURL = "https://open-api.123pan.com"
-)
-
 type Addition struct {
-	// 通常是两个之一
-	driver.RootPath
+	//  refresh_token方式的AccessToken  【对个人开发者暂未开放】
+	//RefreshToken string `json:"RefreshToken" required:"false"`
+
+	//  通过 https://www.123pan.com/developer 申请
+	ClientID     string `json:"ClientID" required:"false"`
+	ClientSecret string `json:"ClientSecret" required:"false"`
+
+	//  直接写入AccessToken
+	AccessToken string `json:"AccessToken" required:"false"`
+
+	//  用户名+密码方式登录的AccessToken可以兼容
+	//Username string `json:"username" required:"false"`
+	//Password string `json:"password" required:"false"`
+
+	UploadThread int `json:"UploadThread" type:"number" default:"3" help:"the threads of upload"`
 	driver.RootID
-
-	// 自定义域名 例如 vip.123pan.cn
-	Domain string `json:"domain" type:"text" required:"true" help:"The domain used for accessing the service" default:"vip.123pan.cn"`
-	// 是否启用HTTPS
-	EnableHTTPS bool `json:"enable_https" type:"bool" default:"false"`
-	// 下载链接中的UID 不设置为隐藏
-	UUID string `json:"uuid" type:"text"`
-	// 下载时的直链鉴权密钥
-	DownloadKey string `json:"download_key" type:"text"`
-
-	// OpenAPI 相关
-	ClientID     string `json:"client_id" type:"text"`
-	ClientSecret string `json:"client_secret" type:"text"`
-
-	RootFolderID int `json:"root_folder_id" type:"number"`
-	access_token string
 }
 
 var config = driver.Config{
-	Name: "123PanLinkDir",
+	Name:        "123 Open",
+	DefaultRoot: "0",
+	LocalSort:   true,
 }
 
 func init() {
 	op.RegisterDriver(func() driver.Driver {
-		return &Pan123LinkDir{}
+		return &Open123{}
 	})
 }

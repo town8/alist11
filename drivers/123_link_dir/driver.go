@@ -1,325 +1,131 @@
-package _123LinkDir
+package _123_open
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"strconv"
-	"strings"
-
-	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/internal/stream"
+	"github.com/alist-org/alist/v3/pkg/utils"
+	"strconv"
 )
 
-const DIRVER_API = "https://open-api.123pan.com"
-
-type Pan123LinkDir struct {
+type Open123 struct {
 	model.Storage
 	Addition
 }
 
-func (d *Pan123LinkDir) Config() driver.Config {
+func (d *Open123) Config() driver.Config {
 	return config
 }
 
-func (d *Pan123LinkDir) GetAddition() driver.Additional {
+func (d *Open123) GetAddition() driver.Additional {
 	return &d.Addition
 }
 
-func (d *Pan123LinkDir) Init(ctx context.Context) error {
-	req := base.RestyClient.R()
-	req.SetHeader(
-		"Platform", "open_platform",
-	)
-	req.SetFormData(map[string]string{
-		"client_id":     d.ClientID,
-		"client_secret": d.ClientSecret,
-	})
-
-	res, err := req.Execute(http.MethodPost, DIRVER_API+"/api/v1/access_token")
-	if err != nil {
-		return err
+func (d *Open123) Init(ctx context.Context) error {
+	if d.UploadThread < 1 || d.UploadThread > 32 {
+		d.UploadThread = 3
 	}
 
-	body := res.Body()
-
-	resStruct := struct {
-		Data struct {
-			AccessToken string `json:"accessToken"`
-		} `json:"data"`
-	}{}
-        
-	err = json.Unmarshal(body, &resStruct)
-	if err != nil {
-		return err
-	}
-
-	d.access_token = resStruct.Data.AccessToken
-        if d.RootFolderID > 0 {
-		fmt.Printf("DEBUG: Setting RootFolderID = %d\n", d.RootFolderID)
-	} else {
-		d.RootFolderID = 0
-	}
 	return nil
 }
 
-func (d *Pan123LinkDir) Drop(ctx context.Context) error {
+func (d *Open123) Drop(ctx context.Context) error {
 	return nil
 }
 
-// Helper function: Split path and fetch parentFileId hierarchically
-// Helper function: Split path and fetch parentFileId hierarchically
-func (d *Pan123LinkDir) getParentFileIdFromPath(ctx context.Context, path string) (int, error) {
-	// Split the path
-	paths := strings.Split(strings.Trim(path, "/"), "/")
-	if len(paths) == 0 {
-		return 0, fmt.Errorf("invalid path")
+func (d *Open123) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
+	fileLastId := int64(0)
+	parentFileId, err := strconv.ParseInt(dir.GetID(), 10, 64)
+	if err != nil {
+		return nil, err
 	}
+	res := make([]File, 0)
 
-	currentParentFileId := 0 // Root starts with 0 as mentioned in the API docs
-	
-	for _, folderName := range paths {
-		// Fetch the file list under the current directory
-		url := DIRVER_API + "/api/v2/file/list"
-		req := base.RestyClient.R().
-			SetQueryParam("parentFileId", strconv.Itoa(currentParentFileId)).
-			SetQueryParam("limit", "100").
-			SetHeader("Authorization", "Bearer "+d.access_token).
-			SetHeader("Platform", "open_platform")
-
-		res, err := req.Execute(http.MethodGet, url)
+	for fileLastId != -1 {
+		files, err := d.getFiles(parentFileId, 100, fileLastId)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
-
-		body := res.Body()
-		fmt.Printf("DEBUG: Fetching folder list for parentFileId=%d, folderName=%s\n", currentParentFileId, folderName)
-		fmt.Printf("DEBUG: API Response: %s\n", string(body))
-
-		bodyStruct := struct {
-			Data struct {
-				FileList []struct {
-					FileId       int    `json:"fileId"`
-					FileName     string `json:"filename"`
-					ParentFileId int    `json:"parentFileId"`
-				} `json:"fileList"`
-			} `json:"data"`
-		}{}
-
-		err = json.Unmarshal(body, &bodyStruct)
-		if err != nil {
-			return 0, err
-		}
-
-		// Find the folder with the given name
-		found := false
-		for _, file := range bodyStruct.Data.FileList {
-			fmt.Printf("DEBUG: Comparing %s with %s\n", folderName, file.FileName)
-			if file.FileName == folderName {
-				currentParentFileId = file.FileId
-				found = true
-				break
+		// 目前123panAPI请求，trashed失效，只能通过遍历过滤
+		for i := range files.Data.FileList {
+			if files.Data.FileList[i].Trashed == 0 {
+				res = append(res, files.Data.FileList[i])
 			}
 		}
+		fileLastId = files.Data.LastFileId
 
-		if !found {
-			return 0, fmt.Errorf("folder %s not found in path", folderName)
+	}
+	return utils.SliceConvert(res, func(src File) (model.Obj, error) {
+		return src, nil
+	})
+}
+
+func (d *Open123) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
+	fileId, _ := strconv.ParseInt(file.GetID(), 10, 64)
+
+	res, err := d.getDownloadInfo(fileId)
+	if err != nil {
+		return nil, err
+	}
+
+	link := model.Link{URL: res.Data.DownloadUrl}
+	return &link, nil
+}
+
+func (d *Open123) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
+	parentFileId, _ := strconv.ParseInt(parentDir.GetID(), 10, 64)
+
+	return d.mkdir(parentFileId, dirName)
+}
+
+func (d *Open123) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
+	toParentFileID, _ := strconv.ParseInt(dstDir.GetID(), 10, 64)
+
+	return d.move(srcObj.(File).FileId, toParentFileID)
+}
+
+func (d *Open123) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
+	fileId, _ := strconv.ParseInt(srcObj.GetID(), 10, 64)
+
+	return d.rename(fileId, newName)
+}
+
+func (d *Open123) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
+	return errs.NotSupport
+}
+
+func (d *Open123) Remove(ctx context.Context, obj model.Obj) error {
+	fileId, _ := strconv.ParseInt(obj.GetID(), 10, 64)
+
+	return d.trash(fileId)
+}
+
+func (d *Open123) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) error {
+	parentFileId, err := strconv.ParseInt(dstDir.GetID(), 10, 64)
+	if err != nil {
+		return err
+	}
+	
+	etag := file.GetHash().GetHash(utils.MD5)
+
+	if len(etag) < utils.MD5.Width {
+		_, etag, err = stream.CacheFullInTempFileAndHash(file, utils.MD5)
+		if err != nil {
+			return err
 		}
 	}
-
-	return currentParentFileId, nil
-}
-// Modify List method to allow path-based directory listing by resolving parentFileId
-func (d *Pan123LinkDir) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	parentFileId, err := d.getParentFileIdFromPath(ctx, dir.GetPath())
-	if err != nil {
-		return nil, err
-	}
-
-	url := DIRVER_API + "/api/v2/file/list"
-	req := base.RestyClient.R().
-		SetQueryParam("parentFileId", strconv.Itoa(parentFileId)).
-		SetQueryParam("limit", "100").
-		SetHeader("Authorization", "Bearer "+d.access_token).
-		SetHeader("Platform", "open_platform")
-
-	res, err := req.Execute(http.MethodGet, url)
-	if err != nil {
-		return nil, err
-	}
-
-	body := res.Body()
-	bodyStruct := struct {
-		Data struct {
-			FileList []File `json:"fileList"`
-		} `json:"data"`
-	}{}
-
-	err = json.Unmarshal(body, &bodyStruct)
-	if err != nil {
-		return nil, err
-	}
-
-	objs := make([]model.Obj, 0)
-	for _, file := range bodyStruct.Data.FileList {
-		objs = append(objs, &file)
-	}
-
-	return objs, nil
-}
-
-// Add similar logic to other functions (e.g., MakeDir, Move, etc.) if they also need to resolve paths
-
-func (d *Pan123LinkDir) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	protocol := "http"
-	if d.EnableHTTPS {
-		protocol = "https"
-	}
-	var url string
-	if d.UUID != "" {
-		url = fmt.Sprintf("%s://%s/%s/%s", protocol, d.Domain, d.UUID, file.GetID())
-	} else {
-		url = fmt.Sprintf("%s://%s/%s", protocol, d.Domain, file.GetID())
-	}
-
-	return &model.Link{
-		URL: url,
-	}, nil
-}
-
-// Update MakeDir: Ensure recursion works based on hierarchy
-func (d *Pan123LinkDir) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
-	parentFileId, err := d.getParentFileIdFromPath(ctx, parentDir.GetPath())
-	if err != nil {
-		return nil, err
-	}
-
-	url := DIRVER_API + "/upload/v1/file/mkdir"
-	req := base.RestyClient.R().
-		SetBody(map[string]string{
-			"name":     dirName,
-			"parentID": strconv.Itoa(parentFileId),
-		}).
-		SetHeader("Authorization", "Bearer "+d.access_token).
-		SetHeader("Platform", "open_platform")
-
-	res, err := req.Execute(http.MethodPost, url)
-	if err != nil {
-		return nil, err
-	}
-
-	body := res.Body()
-	bodyStruct := struct {
-		Data struct {
-			DirID int `json:"dirID"`
-		} `json:"data"`
-	}{}
-
-	err = json.Unmarshal(body, &bodyStruct)
-	if err != nil {
-		return nil, err
-	}
-
-	file := File{
-		FileId:       bodyStruct.Data.DirID,
-		FileName:     dirName,
-		ParentFileId: int64(parentFileId),
-		Type:         1,
-	}
-
-	return &file, nil
-}
-
-func (d *Pan123LinkDir) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
-	url := DIRVER_API + "/api/v1/file/move"
-	req := base.RestyClient.R().
-		SetBody(map[string]any{
-			"fileIDs":        []any{GetObjID(srcObj)},
-			"toParentFileID": GetObjID(dstDir),
-		}).
-		SetHeader("Authorization", "Bearer "+d.access_token).
-		SetHeader("Platform", "open_platform")
-
-	_, err := req.Execute(http.MethodPost, url)
-	if err != nil {
-		return nil, err
-	}
-
-	return srcObj, nil
-}
-
-func (d *Pan123LinkDir) Rename(ctx context.Context, srcObj model.Obj, newName string) (model.Obj, error) {
-	url := DIRVER_API + "/api/v1/file/rename"
-	req := base.RestyClient.R().
-		SetBody(map[string]any{
-			"renameList": []string{fmt.Sprintf("%s|%s", GetObjID(srcObj), newName)},
-		}).
-		SetHeader("Authorization", "Bearer "+d.access_token).
-		SetHeader("Platform", "open_platform")
-
-	_, err := req.Execute(http.MethodPost, url)
-	if err != nil {
-		return nil, err
-	}
-
-	objID, err := strconv.Atoi(GetObjID(srcObj))
-	if err != nil {
-		return nil, err
-	}
-
-	file := File{
-		FileId:   objID,
-		FileName: newName,
-		Type:     0,
-	}
-
-	if srcObj.IsDir() {
-		file.Type = 1
-	}
-
-	return &file, nil
-}
-
-func (d *Pan123LinkDir) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
-	return nil, errs.NotImplement
-}
-
-func (d *Pan123LinkDir) Remove(ctx context.Context, obj model.Obj) error {
-	url := DIRVER_API + "/api/v1/file/trash"
-	url_delete := DIRVER_API + "/api/v1/file/delete"
-
-	req := base.RestyClient.R().
-		SetBody(map[string]any{
-			"fileIDs": []any{obj.GetID()},
-		}).
-		SetHeader("Authorization", "Bearer "+d.access_token).
-		SetHeader("Platform", "open_platform")
-
-	_, err := req.Execute(http.MethodPost, url)
+	createResp, err := d.create(parentFileId, file.GetName(), etag, file.GetSize(), 2, false)
 	if err != nil {
 		return err
 	}
-
-	req_delete := base.RestyClient.R().
-		SetBody(map[string]any{
-			"fileIDs": []any{obj.GetID()},
-		}).
-		SetHeader("Authorization", "Bearer "+d.access_token).
-		SetHeader("Platform", "open_platform")
-
-	_, err = req_delete.Execute(http.MethodPost, url_delete)
-	if err != nil {
-		return err
+	if createResp.Data.Reuse {
+		return nil
 	}
+	up(10)
 
-	return nil
+	return d.Upload(ctx, file, createResp, up)
 }
 
-func (d *Pan123LinkDir) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
-	return nil, errs.NotImplement
-}
-
-var _ driver.Driver = (*Pan123LinkDir)(nil)
+var _ driver.Driver = (*Open123)(nil)
